@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "omp-file-size-guard",
-	"version": "1.1.0",
+	"version": "1.2.0",
 	"description": "AI-agent extension that blocks and reports oversized files, with per-project exemptions and first-run onboarding. Adapters for omp, pi, and opencode.",
 	"license": "MIT",
 	"homepage": "https://github.com/abdulrahmanch1/omp-file-size-guard",
@@ -18,7 +18,7 @@
 		"LICENSE"
 	],
 	"bin": {
-		"fsg": "dist/bin/fsg.js"
+		"file-size-guard": "dist/bin/fsg.js"
 	},
 	"omp": {
 		"extensions": [
@@ -34,6 +34,26 @@
 		"esbuild": "^0.25.0"
 	},
 	"scripts": {
-		"build": "node build.mjs"
+		"build": "node build.mjs",
+		"prepublishOnly": "npm run build"
+	},
+	"author": "Abdulrahman (https://github.com/abdulrahmanch1)",
+	"keywords": [
+		"ai-agent",
+		"claude-code",
+		"opencode",
+		"oh-my-pi",
+		"pi",
+		"guardrails",
+		"file-size",
+		"code-quality",
+		"pre-commit",
+		"ci"
+	],
+	"engines": {
+		"node": ">=18"
+	},
+	"publishConfig": {
+		"access": "public"
 	}
 }
