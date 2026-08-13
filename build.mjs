@@ -30,4 +30,13 @@ await build({
 	outfile: "dist/opencode/file-size-guard.js",
 });
 
-console.log("dist built: omp (esm), pi (cjs), opencode (esm)");
+await build({
+	...shared,
+	platform: "node",
+	format: "esm",
+	banner: { js: "#!/usr/bin/env node" },
+	entryPoints: ["bin/fsg.ts"],
+	outfile: "dist/bin/fsg.js",
+});
+
+console.log("dist built: omp (esm), pi (cjs), opencode (esm), cli (bin/fsg.js)");

@@ -12,10 +12,14 @@
 	"files": [
 		"core/",
 		"adapters/",
+		"bin/",
 		"dist/",
 		"README.md",
 		"LICENSE"
 	],
+	"bin": {
+		"fsg": "dist/bin/fsg.js"
+	},
 	"omp": {
 		"extensions": [
 			"./adapters/omp/file-size-guard.ts"

@@ -75,6 +75,33 @@ curl -o ~/.config/opencode/plugin/file-size-guard.js \
 
 Or add the repository URL to the `plugin` array in `opencode.json`.
 
+## CLI — same policy for humans and CI
+
+The guard is not only for agents. `fsg check` scans **every authored file** in the repository (tracked + untracked, `.gitignore` respected, exemptions applied) and exits non-zero when files are over the limits:
+
+```bash
+# no install needed — npx runs it straight from the repo:
+npx --yes github:abdulrahmanch1/omp-file-size-guard check                  # scan current repo; exit 1 if anything is over 150 lines
+npx --yes github:abdulrahmanch1/omp-file-size-guard check --fail-on=error  # fail only on the 350-line hard limit
+# or globally: npm i -g github:abdulrahmanch1/omp-file-size-guard && fsg check
+```
+
+Exit codes: `0` clean · `1` violations at or above `--fail-on` · `2` not a git repository.
+
+Pre-commit hook (`.git/hooks/pre-commit`):
+
+```bash
+#!/bin/sh
+exec fsg check
+```
+
+GitHub Action:
+
+```yaml
+- name: File size guard
+  run: npx --yes github:abdulrahmanch1/omp-file-size-guard check --fail-on=strict
+```
+
 ## How it works
 
 1. **Pre-execution block** — for `write`/`edit`, the resulting content is computed (including `replace_all` edits) and the call is blocked if it would exceed 350 lines, unless exempted.
