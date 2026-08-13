@@ -1,0 +1,21 @@
+{
+	"name": "omp-file-size-guard",
+	"version": "1.0.0",
+	"description": "omp extension that blocks and reports oversized files written by the AI agent, with per-project exemptions and first-run onboarding",
+	"license": "MIT",
+	"homepage": "https://github.com/abdulrahmanch1/omp-file-size-guard",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/abdulrahmanch1/omp-file-size-guard.git"
+	},
+	"files": [
+		"file-size-guard.ts",
+		"README.md",
+		"LICENSE"
+	],
+	"omp": {
+		"extensions": [
+			"./file-size-guard.ts"
+		]
+	}
+}

@@ -20,7 +20,17 @@ Warnings repeat on every run while a file stays over the limit.
 
 ## Install
 
-User level (guards every project, every session):
+As an omp plugin package (recommended — managed by `omp plugin`, upgradeable):
+
+```bash
+omp install https://github.com/abdulrahmanch1/omp-file-size-guard
+# or from a local clone:
+omp install ./omp-file-size-guard
+```
+
+Manage it afterwards with `omp plugin list` / `omp plugin uninstall omp-file-size-guard` / `omp plugin doctor`.
+
+Manual install (zero-tooling fallback): copy `file-size-guard.ts` into `~/.omp/agent/extensions/` (guards every project) or `<project>/.omp/extensions/` (one project):
 
 ```bash
 mkdir -p ~/.omp/agent/extensions
@@ -28,9 +38,7 @@ curl -o ~/.omp/agent/extensions/file-size-guard.ts \
   https://raw.githubusercontent.com/abdulrahmanch1/omp-file-size-guard/main/file-size-guard.ts
 ```
 
-Or project level (only this repository): copy `file-size-guard.ts` into `<project>/.omp/extensions/`.
-
-No configuration entry is needed — omp auto-discovers `extensions/` directories at startup. The guard activates on the next session.
+Either way, omp discovers and loads the guard at startup — it activates on the next session.
 
 ## How it works
 
