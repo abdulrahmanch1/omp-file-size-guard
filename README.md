@@ -1,5 +1,8 @@
 # file-size-guard
 
+[![npm](https://img.shields.io/npm/v/omp-file-size-guard)](https://www.npmjs.com/package/omp-file-size-guard)
+[![test](https://github.com/abdulrahmanch1/omp-file-size-guard/actions/workflows/test.yml/badge.svg)](https://github.com/abdulrahmanch1/omp-file-size-guard/actions/workflows/test.yml)
+
 A cross-host guard that stops oversized files from being created without justification — by AI agents **and** by humans. One shared core (`core/guard.ts`) powers:
 
 - **Agent extensions** for **omp**, **pi**, and **opencode** — any file the agent makes or changes (file tools, shell commands, subagents) is checked against three line-count tiers, using git as the source of truth for what changed
