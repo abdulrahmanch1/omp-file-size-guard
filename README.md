@@ -38,6 +38,15 @@ No configuration entry is needed — omp auto-discovers `extensions/` directorie
 2. **End-of-run scan (`session_stop`)** — when the agent finishes a prompt, the guard diffs the working tree against a baseline snapshot taken when the run started (`git diff HEAD` + `git ls-files --others`). Every file that appeared or changed during the run is line-counted (streamed, memory-bounded, binary-safe) and over-limit files are handed back to the agent immediately as a continuation, so it fixes or exempts them within the same prompt. Core caps consecutive continuations at 8.
 3. Files dirty *before* the run are only flagged if the agent touched them. `.gitignore`d paths (`node_modules/`, build output, …) are excluded natively by git. The exemption file itself is re-read on every check.
 
+## First run in a project (onboarding)
+
+The first time you open an interactive session in a git repository, the guard scans **every** authored file (tracked + untracked, `.gitignore` respected) and shows a dialog with the counts per tier:
+
+- **Yes** — the agent starts fixing each over-limit file immediately (split / shrink / extract constants), adding an exemption only where a single piece is genuinely required. The normal end-of-run scan supervises the work and sends the agent back to anything still over the limit.
+- **No** — every flagged file is added to `.omp/file-size-exemptions.json` (reason: *"Pre-existing file at file-size-guard adoption; user declined onboarding fixes."*) and never flagged again.
+
+Onboarding runs **exactly once per project**, recorded in `.omp/file-size-guard-onboarded.json`. A clean project writes the marker silently without a dialog. Headless sessions are skipped (the offer stays open for your next interactive session), and a dialog that fails or times out postpones onboarding — it never bulk-exempts by accident. Delete the marker file to re-run onboarding.
+
 ## Exemptions — per project
 
 Each project keeps its **own** exemption file at `<project>/.omp/file-size-exemptions.json`. Exempted files are never flagged again:

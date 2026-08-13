@@ -1,12 +1,13 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const WARN_LINES = 150;
 const STRICT_LINES = 250;
 const ERROR_LINES = 350;
 const EXEMPTIONS_REL = ".omp/file-size-exemptions.json";
+const ONBOARDED_REL = ".omp/file-size-guard-onboarded.json";
 
 interface Exemptions {
 	files: Record<string, string>;
@@ -137,6 +138,14 @@ function statKey(abs: string): string {
 	}
 }
 
+// Every authored file in the repo: tracked + untracked-but-not-ignored.
+// Used only by the one-time onboarding scan.
+function allFiles(root: string): string[] {
+	const stdout = git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
+	if (stdout === null) return [];
+	return stdout.split("\0").filter((p) => p.length > 0);
+}
+
 export default function fileSizeGuard(pi: ExtensionAPI): void {
 	const probeRoot = (cwd: string): string | null => {
 		const out = git(cwd, ["rev-parse", "--show-toplevel"]);
@@ -162,6 +171,91 @@ export default function fileSizeGuard(pi: ExtensionAPI): void {
 	let baseline: Map<string, string> = new Map();
 	let baselineRoot: string | null = null;
 	let continuationExpected = false;
+
+	// One-time onboarding per project: on the first interactive session in a git
+	// repo, scan EVERY authored file (not just changed ones) and let the user
+	// choose: the agent fixes all over-limit files now, or every flagged file is
+	// bulk-exempted. A marker file makes it run exactly once; headless sessions
+	// and non-git directories are skipped without consuming the marker.
+	pi.on("session_start", async (_event, ctx) => {
+		const root = repoRoot(ctx.cwd);
+		if (root === null) return;
+		const markerPath = path.join(ctx.cwd, ONBOARDED_REL);
+		if (existsSync(markerPath)) return;
+		if (!ctx.hasUI) return;
+		const ex = loadExemptions(ctx.cwd);
+		const flagged: string[] = [];
+		const counts = { warn: 0, strict: 0, error: 0 };
+		for (const p of allFiles(root)) {
+			const abs = path.join(root, p);
+			if (shouldSkip(abs, ctx.cwd) || isExempt(abs, ctx.cwd, ex)) continue;
+			const lines = countFileLines(abs);
+			if (lines === null) continue;
+			const tier = tierFor(lines);
+			if (!tier) continue;
+			counts[tier]++;
+			const limit = tier === "error" ? ERROR_LINES : tier === "strict" ? STRICT_LINES : WARN_LINES;
+			flagged.push(`${relKey(abs, ctx.cwd)} — ${lines} lines (limit ${limit})`);
+		}
+		const writeMarker = (decision: string): void => {
+			try {
+				mkdirSync(path.join(ctx.cwd, ".omp"), { recursive: true });
+				writeFileSync(markerPath, `${JSON.stringify({ version: 1, decision, at: new Date().toISOString() })}\n`);
+			} catch {
+				// a read-only .omp must not break the session; onboarding simply re-offers next time
+			}
+		};
+		if (flagged.length === 0) {
+			writeMarker("clean");
+			return;
+		}
+		const message = `${flagged.length} file(s) exceed the line limits (${counts.error} over ${ERROR_LINES}, ${counts.strict} over ${STRICT_LINES}, ${counts.warn} over ${WARN_LINES}).\n\nYes — the agent fixes each file now (split / shrink / extract constants), exempting only what genuinely must stay one piece.\nNo — every flagged file is added to .omp/file-size-exemptions.json and never flagged again.`;
+		// Deferred past session_start dispatch: the confirm may sit unanswered
+		// longer than the 30s handler timeout. A failed/dismissed dialog POSTPONES
+		// onboarding (no marker, no exemptions) — it never bulk-exempts by accident.
+		ctx.setTimeout(() => {
+			void (async () => {
+				let fix: boolean;
+				try {
+					fix = await ctx.ui.confirm("file-size-guard: initial project scan", message);
+				} catch {
+					ctx.ui.notify("file-size-guard: initial scan postponed to next session", "info");
+					return;
+				}
+				if (!fix) {
+					const exPath = path.join(ctx.cwd, EXEMPTIONS_REL);
+					let raw: Record<string, unknown> = {};
+					try {
+						const parsed: unknown = JSON.parse(readFileSync(exPath, "utf8"));
+						if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) raw = parsed as Record<string, unknown>;
+					} catch {
+						raw = {};
+					}
+					const files: Record<string, string> =
+						raw.files && typeof raw.files === "object" && !Array.isArray(raw.files)
+							? { ...(raw.files as Record<string, string>) }
+							: {};
+					for (const entry of flagged) {
+						files[entry.split(" — ")[0]] = "Pre-existing file at file-size-guard adoption; user declined onboarding fixes.";
+					}
+					raw.files = files;
+					try {
+						mkdirSync(path.join(ctx.cwd, ".omp"), { recursive: true });
+						writeFileSync(exPath, `${JSON.stringify(raw, null, 2)}\n`);
+					} catch {
+						// same rationale as writeMarker
+					}
+					writeMarker("exempted");
+					ctx.ui.notify(`file-size-guard: ${flagged.length} pre-existing file(s) exempted`, "info");
+					return;
+				}
+				writeMarker("fix");
+				const list = flagged.slice(0, 1000);
+				const prompt = `[file-size-guard onboarding] This project has ${flagged.length} file(s) over the line limits:\n${list.map((f) => `- ${f}`).join("\n")}${flagged.length > list.length ? `\n…and ${flagged.length - list.length} more.` : ""}\nFix every one now: split into smaller modules, shrink them, or extract repeated literals into constants. Only where a single piece is genuinely required, add a convincing per-file exemption to .omp/file-size-exemptions.json. The guard re-scans everything you change when your run ends and will send you back to any file still over the limit.`;
+				void pi.sendUserMessage(prompt);
+			})();
+		}, 300);
+	});
 
 	// Pre-execution hard limit (>350) for write/edit — the only tier that can be
 	// prevented before it happens. Everything else is reported when the run settles.
