@@ -1,6 +1,6 @@
-# omp-file-size-guard
+# file-size-guard
 
-An [Oh My Pi (omp)](https://github.com/badlogic/oh-my-pi) extension that stops the AI agent from creating oversized files without justification. Any file the agent makes or changes — through `write`, `edit`, `ast_edit`, `bash`, `eval`, or task subagents — is checked against three line-count tiers, using git as the source of truth for what changed.
+A cross-host AI-agent guard that stops the agent from creating oversized files without justification. Any file the agent makes or changes — through file tools, shell commands, or subagents — is checked against three line-count tiers, using git as the source of truth for what changed. One shared core (`core/guard.ts`) powers thin adapters for **omp**, **pi**, and **opencode**.
 
 ## Behavior
 
@@ -8,19 +8,28 @@ An [Oh My Pi (omp)](https://github.com/badlogic/oh-my-pi) extension that stops t
 |---|---|
 | > 150 | `WARNING` — review the file: split it, shrink it, extract repeated literals into constants, or justify it |
 | > 250 | `STRICT WARNING` — same mechanism, stronger wording |
-| > 350 | **Blocked before it happens** for `write`/`edit` (the tool call is rejected with instructions). For changes made any other way, an `ERROR` report is delivered the moment the run settles and the agent must fix it immediately |
+| > 350 | **Blocked before it happens** where the host supports pre-tool interception (the call is rejected with instructions). Otherwise an `ERROR` report is delivered the moment the run settles and the agent must fix it immediately |
 
 Warnings repeat on every run while a file stays over the limit.
 
-## Requirements
+## Requirements (all hosts)
 
-- omp (extension auto-discovery; tested on v17.3)
 - The project must be a **git repository** — outside one, the guard is completely inactive by design
 - `git` on `PATH`
 
+## Repository layout
+
+- `core/guard.ts` — all host-agnostic logic: line counting, git diffing, tiering, exemptions, onboarding scans, report formatting
+- `adapters/omp/` — Oh My Pi adapter (extension events: `tool_call`, `session_stop`, `before_agent_start`, `agent_end`)
+- `adapters/pi/` — pi adapter (extension events: `tool_call`, `before_agent_start`, `agent_end`, `session_start`)
+- `adapters/opencode/` — opencode adapter (plugin hooks: `tool.execute.before`, `event`/`session.idle`)
+- `dist/` — standalone single-file bundles (`npm run build`) for manual installs that cannot resolve the shared core import
+
 ## Install
 
-As an omp plugin package (recommended — managed by `omp plugin`, upgradeable):
+### Oh My Pi (omp)
+
+Plugin package (recommended — managed by `omp plugin`, upgradeable):
 
 ```bash
 omp install https://github.com/abdulrahmanch1/omp-file-size-guard
@@ -28,32 +37,62 @@ omp install https://github.com/abdulrahmanch1/omp-file-size-guard
 omp install ./omp-file-size-guard
 ```
 
-Manage it afterwards with `omp plugin list` / `omp plugin uninstall omp-file-size-guard` / `omp plugin doctor`.
+Manage with `omp plugin list` / `omp plugin uninstall omp-file-size-guard` / `omp plugin doctor`.
 
-Manual install (zero-tooling fallback): copy `file-size-guard.ts` into `~/.omp/agent/extensions/` (guards every project) or `<project>/.omp/extensions/` (one project):
+Manual single-file fallback — guards every project; omp auto-discovers at startup:
 
 ```bash
 mkdir -p ~/.omp/agent/extensions
-curl -o ~/.omp/agent/extensions/file-size-guard.ts \
-  https://raw.githubusercontent.com/abdulrahmanch1/omp-file-size-guard/main/file-size-guard.ts
+curl -o ~/.omp/agent/extensions/file-size-guard.js \
+  https://raw.githubusercontent.com/abdulrahmanch1/omp-file-size-guard/main/dist/omp/file-size-guard.js
 ```
 
-Either way, omp discovers and loads the guard at startup — it activates on the next session.
+### pi
+
+Package install (the full tree keeps `core/` resolvable):
+
+```bash
+pi install https://github.com/abdulrahmanch1/omp-file-size-guard
+```
+
+Manual single-file fallback:
+
+```bash
+mkdir -p ~/.pi/agent/extensions
+curl -o ~/.pi/agent/extensions/file-size-guard.cjs \
+  https://raw.githubusercontent.com/abdulrahmanch1/omp-file-size-guard/main/dist/pi/file-size-guard.cjs
+```
+
+### opencode
+
+Copy the bundle into the global plugin directory:
+
+```bash
+mkdir -p ~/.config/opencode/plugin
+curl -o ~/.config/opencode/plugin/file-size-guard.js \
+  https://raw.githubusercontent.com/abdulrahmanch1/omp-file-size-guard/main/dist/opencode/file-size-guard.js
+```
+
+Or add the repository URL to the `plugin` array in `opencode.json`.
 
 ## How it works
 
-1. **Pre-execution block (`tool_call`)** — for `write`/`edit`, the resulting content is computed (including `replace_all` edits) and the call is blocked if it would exceed 350 lines, unless exempted.
-2. **End-of-run scan (`session_stop`)** — when the agent finishes a prompt, the guard diffs the working tree against a baseline snapshot taken when the run started (`git diff HEAD` + `git ls-files --others`). Every file that appeared or changed during the run is line-counted (streamed, memory-bounded, binary-safe) and over-limit files are handed back to the agent immediately as a continuation, so it fixes or exempts them within the same prompt. Core caps consecutive continuations at 8.
-3. Files dirty *before* the run are only flagged if the agent touched them. `.gitignore`d paths (`node_modules/`, build output, …) are excluded natively by git. The exemption file itself is re-read on every check.
+1. **Pre-execution block** — for `write`/`edit`, the resulting content is computed (including `replace_all` edits) and the call is blocked if it would exceed 350 lines, unless exempted.
+2. **End-of-run scan** — the guard diffs the working tree against a baseline snapshot (`git diff HEAD` + `git ls-files --others`). Every file that appeared or changed during the run is line-counted (streamed, memory-bounded, binary-safe) and over-limit files are handed back to the agent:
+   - omp: as an immediate continuation within the same prompt (core caps consecutive continuations at 8)
+   - pi: stashed at `agent_end` and delivered as the next prompt's injected message
+   - opencode: injected as a user prompt into the session at `session.idle`, which starts the fix run on its own
+3. Files dirty *before* the run are only flagged if the agent touched them. `.gitignore`d paths (`node_modules/`, build output, …) are excluded natively by git. The exemption file is re-read on every check.
 
 ## First run in a project (onboarding)
 
-The first time you open an interactive session in a git repository, the guard scans **every** authored file (tracked + untracked, `.gitignore` respected) and shows a dialog with the counts per tier:
+The first time the guard runs in a git repository, it scans **every** authored file (tracked + untracked, `.gitignore` respected) for pre-existing violations:
 
-- **Yes** — the agent starts fixing each over-limit file immediately (split / shrink / extract constants), adding an exemption only where a single piece is genuinely required. The normal end-of-run scan supervises the work and sends the agent back to anything still over the limit.
-- **No** — every flagged file is added to `.omp/file-size-exemptions.json` (reason: *"Pre-existing file at file-size-guard adoption; user declined onboarding fixes."*) and never flagged again.
+- **omp** — shows an interactive dialog with per-tier counts. **Yes**: the agent starts fixing each file immediately (the end-of-run scan supervises the work). **No**: every flagged file is added to the exemptions file and never flagged again. Headless sessions are skipped; a dialog that fails or times out postpones onboarding.
+- **pi** — a deferred headless-safe confirm dialog offers the same two choices, delivered via `sendUserMessage`.
+- **opencode** — no plugin UI exists, so the result is injected as a prompt and the agent settles the choice with you (fix now vs bulk-exempt).
 
-Onboarding runs **exactly once per project**, recorded in `.omp/file-size-guard-onboarded.json`. A clean project writes the marker silently without a dialog. Headless sessions are skipped (the offer stays open for your next interactive session), and a dialog that fails or times out postpones onboarding — it never bulk-exempts by accident. Delete the marker file to re-run onboarding.
+Onboarding runs **exactly once per project**, recorded in `.omp/file-size-guard-onboarded.json`; a clean project writes the marker silently. It never bulk-exempts without an affirmative choice. Delete the marker file to re-run onboarding.
 
 ## Exemptions — per project
 
@@ -79,6 +118,13 @@ Each project keeps its **own** exemption file at `<project>/.omp/file-size-exemp
 - Only active inside git repositories.
 - A run aborted by the user (Esc) skips its scan; its changes count as pre-existing for the next prompt.
 - Files outside the repository are not scanned.
+
+## Development
+
+```bash
+npm install
+npm run build   # esbuild -> dist/omp + dist/pi + dist/opencode
+```
 
 ## License
 
