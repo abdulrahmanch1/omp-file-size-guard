@@ -29,7 +29,7 @@ Warnings repeat on every run while a file stays over the limit.
 
 ### Oh My Pi (omp)
 
-Plugin package (recommended — managed by `omp plugin`, upgradeable):
+Plugin package (recommended — managed by `omp plugin`, upgradeable). Requires `bun` on `PATH` (`curl -fsSL https://bun.sh/install | bash`); without it, use the single-file fallback below:
 
 ```bash
 omp install https://github.com/abdulrahmanch1/omp-file-size-guard
