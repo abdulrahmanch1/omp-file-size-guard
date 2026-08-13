@@ -403,4 +403,49 @@ function check(name: string, cond: boolean) {
 	rmSync(ctx.cwd, { recursive: true, force: true });
 }
 
+// N. Custom limits: .omp/file-size-guard.json overrides per-project thresholds
+{
+	// custom error limit blocks a write the defaults would allow
+	const ctx = mkGitCtx();
+	mkdirSync(path.join(ctx.cwd, ".omp"), { recursive: true });
+	writeFileSync(path.join(ctx.cwd, ".omp/file-size-guard.json"), '{"warn": 50, "strict": 75, "error": 100}');
+	const r = await call(ctx, { toolName: "write", input: { path: "big.ts", content: "x\n".repeat(150) } });
+	check("config-custom-error-blocks", r?.block === true && (r.reason ?? "").includes("hard limit 100"));
+	rmSync(ctx.cwd, { recursive: true, force: true });
+}
+{
+	// custom warn limit flags a file the defaults would ignore
+	const ctx = mkGitCtx();
+	mkdirSync(path.join(ctx.cwd, ".omp"), { recursive: true });
+	writeFileSync(path.join(ctx.cwd, ".omp/file-size-guard.json"), '{"warn": 100}');
+	await agentStart(ctx);
+	fixture(ctx, "a.ts", 120);
+	check("config-custom-warn-flags", (await stop(ctx)).includes("soft limit 100"));
+	await agentStart(ctx); // consume the continuation flag for the next case
+	rmSync(ctx.cwd, { recursive: true, force: true });
+}
+{
+	// invalid ordering (warn > default strict) falls back to defaults entirely
+	const ctx = mkGitCtx();
+	mkdirSync(path.join(ctx.cwd, ".omp"), { recursive: true });
+	writeFileSync(path.join(ctx.cwd, ".omp/file-size-guard.json"), '{"warn": 500}');
+	await agentStart(ctx);
+	fixture(ctx, "a.ts", 200);
+	check("config-invalid-falls-back", (await stop(ctx)).includes("soft limit 150"));
+	await agentStart(ctx); // consume the continuation flag for the next case
+	rmSync(ctx.cwd, { recursive: true, force: true });
+}
+{
+	// partial config merges: raised error limit unblocks, other tiers stay default
+	const ctx = mkGitCtx();
+	mkdirSync(path.join(ctx.cwd, ".omp"), { recursive: true });
+	writeFileSync(path.join(ctx.cwd, ".omp/file-size-guard.json"), '{"error": 500}');
+	const r = await call(ctx, { toolName: "write", input: { path: "big.ts", content: "x\n".repeat(400) } });
+	check("config-raised-error-unblocks", r === undefined);
+	await agentStart(ctx);
+	fixture(ctx, "a.ts", 200);
+	check("config-partial-keeps-defaults", (await stop(ctx)).includes("soft limit 150"));
+	rmSync(ctx.cwd, { recursive: true, force: true });
+}
+
 console.log(`\n${passed} assertions passed`);

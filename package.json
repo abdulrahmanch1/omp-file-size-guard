@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "omp-file-size-guard",
-	"version": "1.2.0",
+	"version": "1.3.0",
 	"description": "AI-agent extension that blocks and reports oversized files, with per-project exemptions and first-run onboarding. Adapters for omp, pi, and opencode.",
 	"license": "MIT",
 	"homepage": "https://github.com/abdulrahmanch1/omp-file-size-guard",

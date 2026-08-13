@@ -1,7 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import path from "node:path";
 import {
-	ERROR_LINES,
 	type Baseline,
 	blockReason,
 	bulkExempt,
@@ -10,6 +9,7 @@ import {
 	git,
 	isExempt,
 	loadExemptions,
+	loadLimits,
 	markerExists,
 	onboardingDialog,
 	onboardingPrompt,
@@ -57,14 +57,14 @@ export default function fileSizeGuard(pi: ExtensionAPI): void {
 		setTimeout(() => {
 			void (async () => {
 				try {
-					const { flagged, counts } = scanAll(root, ctx.cwd);
+					const { flagged, counts, limits } = scanAll(root, ctx.cwd);
 					if (flagged.length === 0) {
 						writeMarker(ctx.cwd, "clean");
 						return;
 					}
 					const fix = await ctx.ui.confirm(
 						"file-size-guard: initial project scan",
-						onboardingDialog(flagged, counts),
+						onboardingDialog(flagged, counts, limits),
 					);
 					if (!fix) {
 						bulkExempt(ctx.cwd, flagged);
@@ -72,7 +72,7 @@ export default function fileSizeGuard(pi: ExtensionAPI): void {
 						ctx.ui.notify(`file-size-guard: ${flagged.length} pre-existing file(s) exempted`, "info");
 						return;
 					}
-					await pi.sendUserMessage(onboardingPrompt(flagged));
+					await pi.sendUserMessage(onboardingPrompt(flagged, limits));
 					writeMarker(ctx.cwd, "fix");
 				} catch {
 					// dialog dismissed/failed, scan blew up, or send failed: postpone
@@ -87,7 +87,7 @@ export default function fileSizeGuard(pi: ExtensionAPI): void {
 		}, 300);
 	});
 
-	// Pre-execution hard limit (>350) for write/edit — identical to omp.
+	// Pre-execution hard limit (error tier) for write/edit — identical to omp.
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "write" && event.toolName !== "edit") return;
 		if (repoRoot(ctx.cwd) === null) return;
@@ -105,9 +105,10 @@ export default function fileSizeGuard(pi: ExtensionAPI): void {
 					);
 		if (newText === null) return;
 		const lines = countLines(newText);
-		if (lines <= ERROR_LINES) return;
+		const limits = loadLimits(ctx.cwd);
+		if (lines <= limits.error) return;
 		if (isExempt(abs, ctx.cwd, loadExemptions(ctx.cwd))) return;
-		return { block: true, reason: blockReason(relKey(abs, ctx.cwd), lines) };
+		return { block: true, reason: blockReason(relKey(abs, ctx.cwd), lines, limits) };
 	});
 
 	// Run start: fresh baseline (picks up `git init` since last run), plus
@@ -135,7 +136,7 @@ export default function fileSizeGuard(pi: ExtensionAPI): void {
 		if (root === null || root !== baselineRoot) return;
 		const flagged = scanChanged(root, ctx.cwd, baseline);
 		if (flagged.length === 0) return;
-		pendingReport = reportText(flagged);
+		pendingReport = reportText(flagged, loadLimits(ctx.cwd));
 		if (ctx.hasUI) ctx.ui.notify(`file-size-guard: ${flagged.length} file(s) over the line limits`, "warning");
 	});
 }

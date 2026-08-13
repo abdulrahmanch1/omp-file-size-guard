@@ -1,7 +1,6 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import path from "node:path";
 import {
-	ERROR_LINES,
 	type Baseline,
 	blockReason,
 	bulkExempt,
@@ -10,6 +9,7 @@ import {
 	git,
 	isExempt,
 	loadExemptions,
+	loadLimits,
 	markerExists,
 	onboardingDialog,
 	onboardingPrompt,
@@ -63,14 +63,14 @@ export default function fileSizeGuard(pi: ExtensionAPI): void {
 		if (!ctx.hasUI) return;
 		ctx.setTimeout(() => {
 			void (async () => {
-				const { flagged, counts } = scanAll(root, ctx.cwd);
+				const { flagged, counts, limits } = scanAll(root, ctx.cwd);
 				if (flagged.length === 0) {
 					writeMarker(ctx.cwd, "clean");
 					return;
 				}
 				let fix: boolean;
 				try {
-					fix = await ctx.ui.confirm("file-size-guard: initial project scan", onboardingDialog(flagged, counts));
+					fix = await ctx.ui.confirm("file-size-guard: initial project scan", onboardingDialog(flagged, counts, limits));
 				} catch {
 					ctx.ui.notify("file-size-guard: initial scan postponed to next session", "info");
 					return;
@@ -82,12 +82,12 @@ export default function fileSizeGuard(pi: ExtensionAPI): void {
 					return;
 				}
 				writeMarker(ctx.cwd, "fix");
-				void pi.sendUserMessage(onboardingPrompt(flagged));
+				void pi.sendUserMessage(onboardingPrompt(flagged, limits));
 			})();
 		}, 300);
 	});
 
-	// Pre-execution hard limit (>350) for write/edit — the only tier that can be
+	// Pre-execution hard limit (error tier) for write/edit — the only tier that can be
 	// prevented before it happens. Everything else is reported when the run settles.
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "write" && event.toolName !== "edit") return;
@@ -106,9 +106,10 @@ export default function fileSizeGuard(pi: ExtensionAPI): void {
 					);
 		if (newText === null) return;
 		const lines = countLines(newText);
-		if (lines <= ERROR_LINES) return;
+		const limits = loadLimits(ctx.cwd);
+		if (lines <= limits.error) return;
 		if (isExempt(abs, ctx.cwd, loadExemptions(ctx.cwd))) return;
-		return { block: true, reason: blockReason(relKey(abs, ctx.cwd), lines) };
+		return { block: true, reason: blockReason(relKey(abs, ctx.cwd), lines, limits) };
 	});
 
 	pi.on("before_agent_start", async (_event, ctx) => {
@@ -137,6 +138,6 @@ export default function fileSizeGuard(pi: ExtensionAPI): void {
 		if (flagged.length === 0) return;
 		if (ctx.hasUI) ctx.ui.notify(`file-size-guard: ${flagged.length} file(s) over the line limits`, "warning");
 		continuationExpected = true;
-		return { continue: true, additionalContext: reportText(flagged) };
+		return { continue: true, additionalContext: reportText(flagged, loadLimits(ctx.cwd)) };
 	});
 }

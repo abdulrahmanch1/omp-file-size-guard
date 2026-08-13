@@ -1,17 +1,15 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import path from "node:path";
 import {
-	ERROR_LINES,
 	type Baseline,
 	blockReason,
-	bulkExempt,
 	countLines,
 	estimateEditResult,
 	git,
 	isExempt,
 	loadExemptions,
+	loadLimits,
 	markerExists,
-	onboardingPrompt,
 	relKey,
 	reportText,
 	scanAll,
@@ -43,7 +41,7 @@ export const FileSizeGuard: Plugin = async (input) => {
 	};
 
 	return {
-		// Pre-execution hard limit (>350): throwing blocks the tool call and the
+		// Pre-execution hard limit (error tier): throwing blocks the tool call and the
 		// message reaches the agent as the tool error.
 		"tool.execute.before": async ({ tool }, output) => {
 			if (tool !== "write" && tool !== "edit") return;
@@ -58,9 +56,10 @@ export const FileSizeGuard: Plugin = async (input) => {
 					: estimateEditResult(abs, String(args.oldString ?? ""), String(args.newString ?? ""), args.replaceAll === true);
 			if (newText === null) return;
 			const lines = countLines(newText);
-			if (lines <= ERROR_LINES) return;
+			const limits = loadLimits(cwd);
+			if (lines <= limits.error) return;
 			if (isExempt(abs, cwd, loadExemptions(cwd))) return;
-			throw new Error(blockReason(relKey(abs, cwd), lines));
+			throw new Error(blockReason(relKey(abs, cwd), lines, limits));
 		},
 
 		event: async ({ event }) => {
@@ -94,7 +93,7 @@ export const FileSizeGuard: Plugin = async (input) => {
 			const flagged = scanChanged(root, cwd, baseline);
 			baseline = snapshotBaseline(root); // next run measures from this idle
 			if (flagged.length === 0) return;
-			await inject(sessionID, reportText(flagged));
+			await inject(sessionID, reportText(flagged, loadLimits(cwd)));
 		},
 	};
 };

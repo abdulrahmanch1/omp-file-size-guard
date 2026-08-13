@@ -10,6 +10,25 @@ var STRICT_LINES = 250;
 var ERROR_LINES = 350;
 var EXEMPTIONS_REL = ".omp/file-size-exemptions.json";
 var ONBOARDED_REL = ".omp/file-size-guard-onboarded.json";
+var CONFIG_REL = ".omp/file-size-guard.json";
+var DEFAULT_LIMITS = { warn: WARN_LINES, strict: STRICT_LINES, error: ERROR_LINES };
+function limitsFrom(raw) {
+  if (raw === null || typeof raw !== "object") return null;
+  const merged = { ...DEFAULT_LIMITS };
+  for (const key of ["warn", "strict", "error"]) {
+    const v = raw[key];
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) merged[key] = Math.floor(v);
+  }
+  return merged.warn < merged.strict && merged.strict < merged.error ? merged : null;
+}
+function loadLimits(cwd) {
+  try {
+    const parsed = limitsFrom(JSON.parse(readFileSync(path.join(cwd, CONFIG_REL), "utf8")));
+    if (parsed !== null) return parsed;
+  } catch {
+  }
+  return { ...DEFAULT_LIMITS };
+}
 function countLines(text) {
   if (text.length === 0) return 0;
   let newlines = 0;
@@ -72,29 +91,29 @@ function shouldSkip(absPath, cwd) {
 function isExempt(absPath, cwd, ex) {
   return ex.files[relKey(absPath, cwd)] !== void 0 || ex.extensions[path.extname(absPath)] !== void 0;
 }
-function tierFor(lines) {
-  if (lines > ERROR_LINES) return "error";
-  if (lines > STRICT_LINES) return "strict";
-  if (lines > WARN_LINES) return "warn";
+function tierFor(lines, limits = DEFAULT_LIMITS) {
+  if (lines > limits.error) return "error";
+  if (lines > limits.strict) return "strict";
+  if (lines > limits.warn) return "warn";
   return null;
 }
 var REMEDIATION = `Review the file and decide:
 1. If there is no strong reason for this size: split it into smaller modules, extract repeated literals into constants, or remove duplication \u2014 then continue.
 2. If it genuinely must stay one piece (e.g. this type of file must remain a single unit, or the logic must stay together for readability): add an exemption to .omp/file-size-exemptions.json at the project root with EITHER a per-file entry {"files": {"<cwd-relative-path>": "<convincing reason>"}} OR an extension entry {"extensions": {"<.ext>": "<convincing reason>"}}. Exempted files are never flagged again.`;
-function tierMessage(tier, rel, lines) {
+function tierMessage(tier, rel, lines, limits = DEFAULT_LIMITS) {
   if (tier === "error") {
-    return `[file-size-guard] ERROR: ${rel} now has ${lines} lines (hard limit ${ERROR_LINES}). You MUST reduce it below ${ERROR_LINES} lines before doing anything else: split it, extract constants, or \u2014 only if a single piece is genuinely required \u2014 add a convincing exemption entry.
+    return `[file-size-guard] ERROR: ${rel} now has ${lines} lines (hard limit ${limits.error}). You MUST reduce it below ${limits.error} lines before doing anything else: split it, extract constants, or \u2014 only if a single piece is genuinely required \u2014 add a convincing exemption entry.
 ${REMEDIATION}`;
   }
   if (tier === "strict") {
-    return `[file-size-guard] STRICT WARNING: ${rel} now has ${lines} lines (strict limit ${STRICT_LINES}). This is excessive for a single file.
+    return `[file-size-guard] STRICT WARNING: ${rel} now has ${lines} lines (strict limit ${limits.strict}). This is excessive for a single file.
 ${REMEDIATION}`;
   }
-  return `[file-size-guard] WARNING: ${rel} now has ${lines} lines (soft limit ${WARN_LINES}).
+  return `[file-size-guard] WARNING: ${rel} now has ${lines} lines (soft limit ${limits.warn}).
 ${REMEDIATION}`;
 }
-function blockReason(rel, lines) {
-  return `[file-size-guard] BLOCKED: this change would make ${rel} ${lines} lines (hard limit ${ERROR_LINES}). Write a smaller file: split the code into multiple modules, extract repeated literals into constants, or \u2014 only if a single piece is genuinely required \u2014 first add a convincing exemption entry to .omp/file-size-exemptions.json ({"files": {"${rel}": "<reason>"}}), then retry the write.`;
+function blockReason(rel, lines, limits = DEFAULT_LIMITS) {
+  return `[file-size-guard] BLOCKED: this change would make ${rel} ${lines} lines (hard limit ${limits.error}). Write a smaller file: split the code into multiple modules, extract repeated literals into constants, or \u2014 only if a single piece is genuinely required \u2014 first add a convincing exemption entry to .omp/file-size-exemptions.json ({"files": {"${rel}": "<reason>"}}), then retry the write.`;
 }
 function git(root, args) {
   const r = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
@@ -128,43 +147,45 @@ function snapshotBaseline(root) {
   for (const p of changedFiles(root)) baseline.set(p, statKey(path.join(root, p)));
   return baseline;
 }
-function classify(abs, cwd, ex) {
+function classify(abs, cwd, ex, limits) {
   if (shouldSkip(abs, cwd) || isExempt(abs, cwd, ex)) return null;
   const lines = countFileLines(abs);
   if (lines === null) return null;
-  const tier = tierFor(lines);
+  const tier = tierFor(lines, limits);
   if (!tier) return null;
   return { rel: relKey(abs, cwd), lines, tier };
 }
 function scanChanged(root, cwd, baseline) {
   const ex = loadExemptions(cwd);
+  const limits = loadLimits(cwd);
   const flagged = [];
   for (const p of changedFiles(root)) {
     const abs = path.join(root, p);
     const before = baseline.get(p);
     if (before !== void 0 && before === statKey(abs)) continue;
     if (!existsSync(abs)) continue;
-    const entry = classify(abs, cwd, ex);
+    const entry = classify(abs, cwd, ex, limits);
     if (entry) flagged.push(entry);
   }
   return flagged;
 }
 function scanAll(root, cwd) {
   const ex = loadExemptions(cwd);
+  const limits = loadLimits(cwd);
   const flagged = [];
   const counts = { warn: 0, strict: 0, error: 0 };
   for (const p of allFiles(root)) {
-    const entry = classify(path.join(root, p), cwd, ex);
+    const entry = classify(path.join(root, p), cwd, ex, limits);
     if (!entry) continue;
     counts[entry.tier]++;
     flagged.push(entry);
   }
-  return { flagged, counts };
+  return { flagged, counts, limits };
 }
-function reportText(flagged) {
+function reportText(flagged, limits = DEFAULT_LIMITS) {
   return [
     `[file-size-guard] End-of-turn git scan: ${flagged.length} file(s) changed this turn exceed the line limits. Address each one now \u2014 split it, shrink it, extract constants, or add a convincing exemption:`,
-    ...flagged.map((f) => tierMessage(f.tier, f.rel, f.lines))
+    ...flagged.map((f) => tierMessage(f.tier, f.rel, f.lines, limits))
   ].join("\n\n");
 }
 function markerExists(cwd) {
@@ -204,7 +225,7 @@ var FileSizeGuard = async (input) => {
     });
   };
   return {
-    // Pre-execution hard limit (>350): throwing blocks the tool call and the
+    // Pre-execution hard limit (error tier): throwing blocks the tool call and the
     // message reaches the agent as the tool error.
     "tool.execute.before": async ({ tool }, output) => {
       if (tool !== "write" && tool !== "edit") return;
@@ -216,9 +237,10 @@ var FileSizeGuard = async (input) => {
       const newText = tool === "write" ? String(args.content ?? "") : estimateEditResult(abs, String(args.oldString ?? ""), String(args.newString ?? ""), args.replaceAll === true);
       if (newText === null) return;
       const lines = countLines(newText);
-      if (lines <= ERROR_LINES) return;
+      const limits = loadLimits(cwd);
+      if (lines <= limits.error) return;
       if (isExempt(abs, cwd, loadExemptions(cwd))) return;
-      throw new Error(blockReason(relKey(abs, cwd), lines));
+      throw new Error(blockReason(relKey(abs, cwd), lines, limits));
     },
     event: async ({ event }) => {
       if (event.type !== "session.idle") return;
@@ -251,7 +273,7 @@ Do not proceed with other work until the user has chosen.`
       const flagged = scanChanged(root, cwd, baseline);
       baseline = snapshotBaseline(root);
       if (flagged.length === 0) return;
-      await inject(sessionID, reportText(flagged));
+      await inject(sessionID, reportText(flagged, loadLimits(cwd)));
     }
   };
 };

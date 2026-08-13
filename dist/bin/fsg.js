@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// bin/fsg.ts
+import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
+import path2 from "node:path";
+
 // core/guard.ts
 import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
@@ -8,6 +12,25 @@ var WARN_LINES = 150;
 var STRICT_LINES = 250;
 var ERROR_LINES = 350;
 var EXEMPTIONS_REL = ".omp/file-size-exemptions.json";
+var CONFIG_REL = ".omp/file-size-guard.json";
+var DEFAULT_LIMITS = { warn: WARN_LINES, strict: STRICT_LINES, error: ERROR_LINES };
+function limitsFrom(raw) {
+  if (raw === null || typeof raw !== "object") return null;
+  const merged = { ...DEFAULT_LIMITS };
+  for (const key of ["warn", "strict", "error"]) {
+    const v = raw[key];
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) merged[key] = Math.floor(v);
+  }
+  return merged.warn < merged.strict && merged.strict < merged.error ? merged : null;
+}
+function loadLimits(cwd2) {
+  try {
+    const parsed = limitsFrom(JSON.parse(readFileSync(path.join(cwd2, CONFIG_REL), "utf8")));
+    if (parsed !== null) return parsed;
+  } catch {
+  }
+  return { ...DEFAULT_LIMITS };
+}
 function countFileLines(abs) {
   let fd;
   try {
@@ -64,10 +87,10 @@ function shouldSkip(absPath, cwd2) {
 function isExempt(absPath, cwd2, ex) {
   return ex.files[relKey(absPath, cwd2)] !== void 0 || ex.extensions[path.extname(absPath)] !== void 0;
 }
-function tierFor(lines) {
-  if (lines > ERROR_LINES) return "error";
-  if (lines > STRICT_LINES) return "strict";
-  if (lines > WARN_LINES) return "warn";
+function tierFor(lines, limits2 = DEFAULT_LIMITS) {
+  if (lines > limits2.error) return "error";
+  if (lines > limits2.strict) return "strict";
+  if (lines > limits2.warn) return "warn";
   return null;
 }
 function git(root2, args2) {
@@ -79,31 +102,32 @@ function allFiles(root2) {
   if (stdout === null) return [];
   return stdout.split("\0").filter((p) => p.length > 0);
 }
-function classify(abs, cwd2, ex) {
+function classify(abs, cwd2, ex, limits2) {
   if (shouldSkip(abs, cwd2) || isExempt(abs, cwd2, ex)) return null;
   const lines = countFileLines(abs);
   if (lines === null) return null;
-  const tier = tierFor(lines);
+  const tier = tierFor(lines, limits2);
   if (!tier) return null;
   return { rel: relKey(abs, cwd2), lines, tier };
 }
 function scanAll(root2, cwd2) {
   const ex = loadExemptions(cwd2);
+  const limits2 = loadLimits(cwd2);
   const flagged2 = [];
   const counts2 = { warn: 0, strict: 0, error: 0 };
   for (const p of allFiles(root2)) {
-    const entry = classify(path.join(root2, p), cwd2, ex);
+    const entry = classify(path.join(root2, p), cwd2, ex, limits2);
     if (!entry) continue;
     counts2[entry.tier]++;
     flagged2.push(entry);
   }
-  return { flagged: flagged2, counts: counts2 };
+  return { flagged: flagged2, counts: counts2, limits: limits2 };
 }
-function limitFor(tier) {
-  return tier === "error" ? ERROR_LINES : tier === "strict" ? STRICT_LINES : WARN_LINES;
+function limitFor(tier, limits2) {
+  return tier === "error" ? limits2.error : tier === "strict" ? limits2.strict : limits2.warn;
 }
-function formatFlagged(entry) {
-  return `${entry.rel} \u2014 ${entry.lines} lines (limit ${limitFor(entry.tier)})`;
+function formatFlagged(entry, limits2 = DEFAULT_LIMITS) {
+  return `${entry.rel} \u2014 ${entry.lines} lines (limit ${limitFor(entry.tier, limits2)})`;
 }
 
 // bin/fsg.ts
@@ -126,7 +150,10 @@ Exit codes:
 Exemptions: add entries to .omp/file-size-exemptions.json at the repo root:
   {"files": {"src/data/word-list.ts": "<reason>"}, "extensions": {".snap": "<reason>"}}
 
-Limits: warn > ${WARN_LINES} lines, strict > ${STRICT_LINES}, error > ${ERROR_LINES}`);
+Custom thresholds: add .omp/file-size-guard.json at the repo root (any subset; the rest default):
+  {"warn": 200, "strict": 300, "error": 400}
+
+Default limits: warn > ${DEFAULT_LIMITS.warn} lines, strict > ${DEFAULT_LIMITS.strict}, error > ${DEFAULT_LIMITS.error}`);
 }
 var args = process.argv.slice(2).filter((a) => a !== "check");
 var failOn = "warn";
@@ -154,13 +181,26 @@ for (const a of args) {
   }
 }
 var cwd = dir ?? process.cwd();
+if (!existsSync2(cwd)) {
+  console.error(`fsg: directory does not exist: ${cwd}`);
+  process.exit(2);
+}
 var top = git(cwd, ["rev-parse", "--show-toplevel"]);
 if (top === null) {
   console.error(`fsg: ${cwd} is not inside a git repository \u2014 nothing to check (the guard is git-based by design).`);
   process.exit(2);
 }
 var root = top.trim();
-var { flagged, counts } = scanAll(root, root);
+if (existsSync2(path2.join(root, CONFIG_REL))) {
+  let bad = true;
+  try {
+    bad = limitsFrom(JSON.parse(readFileSync2(path2.join(root, CONFIG_REL), "utf8"))) === null;
+  } catch {
+    bad = true;
+  }
+  if (bad) console.error(`fsg: ${CONFIG_REL} is malformed or not ascending (warn < strict < error) \u2014 using default limits.`);
+}
+var { flagged, counts, limits } = scanAll(root, root);
 if (flagged.length === 0) {
   console.log(`fsg: ${root} \u2014 all authored files within the line limits.`);
   process.exit(0);
@@ -169,10 +209,10 @@ var byTier = (t) => flagged.filter((f) => f.tier === t);
 for (const tier of ["error", "strict", "warn"]) {
   const entries = byTier(tier);
   if (entries.length === 0) continue;
-  const limit = tier === "error" ? ERROR_LINES : tier === "strict" ? STRICT_LINES : WARN_LINES;
+  const limit = tier === "error" ? limits.error : tier === "strict" ? limits.strict : limits.warn;
   console.log(`
 ${tier.toUpperCase()} (over ${limit} lines):`);
-  for (const f of entries) console.log(`  ${formatFlagged(f)}`);
+  for (const f of entries) console.log(`  ${formatFlagged(f, limits)}`);
 }
 console.log(
   `

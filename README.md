@@ -139,6 +139,22 @@ Each project keeps its **own** exemption file at `<project>/.omp/file-size-exemp
 - `extensions` keys: extensions including the dot — exempts every file of that type
 - Either key may be omitted; a missing or malformed file simply means no exemptions
 
+## Custom thresholds — per project
+
+Defaults (150/250/350) fit most projects; override any subset in `<project>/.omp/file-size-guard.json`:
+
+```json
+{
+  "warn": 200,
+  "strict": 300,
+  "error": 400
+}
+```
+
+- Applies to the agents, the CLI, and CI alike — same policy everywhere
+- Missing keys keep their defaults; the three values must be ascending (`warn < strict < error`), otherwise the file is ignored and defaults apply (the CLI prints a notice)
+- Read fresh on every check — edits take effect immediately, no restart
+
 ## Limitations (by design)
 
 - Only active inside git repositories.

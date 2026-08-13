@@ -1,16 +1,18 @@
-// fsg — file-size-guard CLI. `fsg check` scans every authored file in the
+// fsg — file-size-guard CLI. `file-size-guard check` scans every authored file in the
 // current git repository (tracked + untracked, .gitignore respected) and
 // exits non-zero when files exceed the line limits. Same core, exemptions
 // file, and thresholds as the agent extensions — one policy for agents,
 // humans (pre-commit), and CI.
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import {
-	ERROR_LINES,
+	CONFIG_REL,
+	DEFAULT_LIMITS,
 	type FlaggedEntry,
-	STRICT_LINES,
 	type Tier,
-	WARN_LINES,
 	formatFlagged,
 	git,
+	limitsFrom,
 	scanAll,
 } from "../core/guard.ts";
 
@@ -34,7 +36,10 @@ Exit codes:
 Exemptions: add entries to .omp/file-size-exemptions.json at the repo root:
   {"files": {"src/data/word-list.ts": "<reason>"}, "extensions": {".snap": "<reason>"}}
 
-Limits: warn > ${WARN_LINES} lines, strict > ${STRICT_LINES}, error > ${ERROR_LINES}`);
+Custom thresholds: add .omp/file-size-guard.json at the repo root (any subset; the rest default):
+  {"warn": 200, "strict": 300, "error": 400}
+
+Default limits: warn > ${DEFAULT_LIMITS.warn} lines, strict > ${DEFAULT_LIMITS.strict}, error > ${DEFAULT_LIMITS.error}`);
 }
 
 const args = process.argv.slice(2).filter((a) => a !== "check");
@@ -64,6 +69,10 @@ for (const a of args) {
 }
 
 const cwd = dir ?? process.cwd();
+if (!existsSync(cwd)) {
+	console.error(`fsg: directory does not exist: ${cwd}`);
+	process.exit(2);
+}
 const top = git(cwd, ["rev-parse", "--show-toplevel"]);
 if (top === null) {
 	console.error(`fsg: ${cwd} is not inside a git repository — nothing to check (the guard is git-based by design).`);
@@ -71,7 +80,18 @@ if (top === null) {
 }
 const root = top.trim();
 
-const { flagged, counts } = scanAll(root, root);
+// A present-but-unusable config deserves a visible note; absent means silent defaults.
+if (existsSync(path.join(root, CONFIG_REL))) {
+	let bad = true;
+	try {
+		bad = limitsFrom(JSON.parse(readFileSync(path.join(root, CONFIG_REL), "utf8"))) === null;
+	} catch {
+		bad = true;
+	}
+	if (bad) console.error(`fsg: ${CONFIG_REL} is malformed or not ascending (warn < strict < error) — using default limits.`);
+}
+
+const { flagged, counts, limits } = scanAll(root, root);
 
 if (flagged.length === 0) {
 	console.log(`fsg: ${root} — all authored files within the line limits.`);
@@ -82,9 +102,9 @@ const byTier = (t: Tier): FlaggedEntry[] => flagged.filter((f) => f.tier === t);
 for (const tier of ["error", "strict", "warn"] as const) {
 	const entries = byTier(tier);
 	if (entries.length === 0) continue;
-	const limit = tier === "error" ? ERROR_LINES : tier === "strict" ? STRICT_LINES : WARN_LINES;
+	const limit = tier === "error" ? limits.error : tier === "strict" ? limits.strict : limits.warn;
 	console.log(`\n${tier.toUpperCase()} (over ${limit} lines):`);
-	for (const f of entries) console.log(`  ${formatFlagged(f)}`);
+	for (const f of entries) console.log(`  ${formatFlagged(f, limits)}`);
 }
 console.log(
 	`\nfsg: ${flagged.length} file(s) over the limits — ${counts.error} error, ${counts.strict} strict, ${counts.warn} warn. ` +

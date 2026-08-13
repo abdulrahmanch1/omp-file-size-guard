@@ -11,8 +11,43 @@ export const STRICT_LINES = 250;
 export const ERROR_LINES = 350;
 export const EXEMPTIONS_REL = ".omp/file-size-exemptions.json";
 export const ONBOARDED_REL = ".omp/file-size-guard-onboarded.json";
+export const CONFIG_REL = ".omp/file-size-guard.json";
 
 export type Tier = "error" | "strict" | "warn";
+
+// Per-project threshold overrides live in <repo>/.omp/file-size-guard.json:
+// {"warn": 200, "strict": 300, "error": 400} — any subset; the rest default.
+export interface Limits {
+	warn: number;
+	strict: number;
+	error: number;
+}
+
+export const DEFAULT_LIMITS: Limits = { warn: WARN_LINES, strict: STRICT_LINES, error: ERROR_LINES };
+
+// Validate raw config JSON into a full Limits (missing keys take defaults).
+// null = unusable: not an object, or warn < strict < error violated after merging.
+export function limitsFrom(raw: unknown): Limits | null {
+	if (raw === null || typeof raw !== "object") return null;
+	const merged: Limits = { ...DEFAULT_LIMITS };
+	for (const key of ["warn", "strict", "error"] as const) {
+		const v = (raw as Record<string, unknown>)[key];
+		if (typeof v === "number" && Number.isFinite(v) && v > 0) merged[key] = Math.floor(v);
+	}
+	return merged.warn < merged.strict && merged.strict < merged.error ? merged : null;
+}
+
+// Read fresh on every check. Any problem (missing file, malformed JSON,
+// invalid values) means the defaults apply.
+export function loadLimits(cwd: string): Limits {
+	try {
+		const parsed = limitsFrom(JSON.parse(readFileSync(path.join(cwd, CONFIG_REL), "utf8")));
+		if (parsed !== null) return parsed;
+	} catch {
+		// fall through to defaults
+	}
+	return { ...DEFAULT_LIMITS };
+}
 
 export interface Exemptions {
 	files: Record<string, string>;
@@ -96,10 +131,10 @@ export function isExempt(absPath: string, cwd: string, ex: Exemptions): boolean 
 	return ex.files[relKey(absPath, cwd)] !== undefined || ex.extensions[path.extname(absPath)] !== undefined;
 }
 
-export function tierFor(lines: number): Tier | null {
-	if (lines > ERROR_LINES) return "error";
-	if (lines > STRICT_LINES) return "strict";
-	if (lines > WARN_LINES) return "warn";
+export function tierFor(lines: number, limits: Limits = DEFAULT_LIMITS): Tier | null {
+	if (lines > limits.error) return "error";
+	if (lines > limits.strict) return "strict";
+	if (lines > limits.warn) return "warn";
 	return null;
 }
 
@@ -107,18 +142,18 @@ const REMEDIATION = `Review the file and decide:
 1. If there is no strong reason for this size: split it into smaller modules, extract repeated literals into constants, or remove duplication — then continue.
 2. If it genuinely must stay one piece (e.g. this type of file must remain a single unit, or the logic must stay together for readability): add an exemption to .omp/file-size-exemptions.json at the project root with EITHER a per-file entry {"files": {"<cwd-relative-path>": "<convincing reason>"}} OR an extension entry {"extensions": {"<.ext>": "<convincing reason>"}}. Exempted files are never flagged again.`;
 
-export function tierMessage(tier: Tier, rel: string, lines: number): string {
+export function tierMessage(tier: Tier, rel: string, lines: number, limits: Limits = DEFAULT_LIMITS): string {
 	if (tier === "error") {
-		return `[file-size-guard] ERROR: ${rel} now has ${lines} lines (hard limit ${ERROR_LINES}). You MUST reduce it below ${ERROR_LINES} lines before doing anything else: split it, extract constants, or — only if a single piece is genuinely required — add a convincing exemption entry.\n${REMEDIATION}`;
+		return `[file-size-guard] ERROR: ${rel} now has ${lines} lines (hard limit ${limits.error}). You MUST reduce it below ${limits.error} lines before doing anything else: split it, extract constants, or — only if a single piece is genuinely required — add a convincing exemption entry.\n${REMEDIATION}`;
 	}
 	if (tier === "strict") {
-		return `[file-size-guard] STRICT WARNING: ${rel} now has ${lines} lines (strict limit ${STRICT_LINES}). This is excessive for a single file.\n${REMEDIATION}`;
+		return `[file-size-guard] STRICT WARNING: ${rel} now has ${lines} lines (strict limit ${limits.strict}). This is excessive for a single file.\n${REMEDIATION}`;
 	}
-	return `[file-size-guard] WARNING: ${rel} now has ${lines} lines (soft limit ${WARN_LINES}).\n${REMEDIATION}`;
+	return `[file-size-guard] WARNING: ${rel} now has ${lines} lines (soft limit ${limits.warn}).\n${REMEDIATION}`;
 }
 
-export function blockReason(rel: string, lines: number): string {
-	return `[file-size-guard] BLOCKED: this change would make ${rel} ${lines} lines (hard limit ${ERROR_LINES}). Write a smaller file: split the code into multiple modules, extract repeated literals into constants, or — only if a single piece is genuinely required — first add a convincing exemption entry to .omp/file-size-exemptions.json ({"files": {"${rel}": "<reason>"}}), then retry the write.`;
+export function blockReason(rel: string, lines: number, limits: Limits = DEFAULT_LIMITS): string {
+	return `[file-size-guard] BLOCKED: this change would make ${rel} ${lines} lines (hard limit ${limits.error}). Write a smaller file: split the code into multiple modules, extract repeated literals into constants, or — only if a single piece is genuinely required — first add a convincing exemption entry to .omp/file-size-exemptions.json ({"files": {"${rel}": "<reason>"}}), then retry the write.`;
 }
 
 export function git(root: string, args: string[]): string | null {
@@ -150,7 +185,7 @@ function statKey(abs: string): string {
 }
 
 // Every authored file in the repo: tracked + untracked-but-not-ignored.
-// Used only by the one-time onboarding scan.
+// Used by the full-tree scan (agent onboarding and the `file-size-guard` CLI).
 export function allFiles(root: string): string[] {
 	const stdout = git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
 	if (stdout === null) return [];
@@ -167,11 +202,11 @@ export function snapshotBaseline(root: string): Baseline {
 	return baseline;
 }
 
-function classify(abs: string, cwd: string, ex: Exemptions): FlaggedEntry | null {
+function classify(abs: string, cwd: string, ex: Exemptions, limits: Limits): FlaggedEntry | null {
 	if (shouldSkip(abs, cwd) || isExempt(abs, cwd, ex)) return null;
 	const lines = countFileLines(abs); // null = binary or unreadable
 	if (lines === null) return null;
-	const tier = tierFor(lines);
+	const tier = tierFor(lines, limits);
 	if (!tier) return null;
 	return { rel: relKey(abs, cwd), lines, tier };
 }
@@ -179,55 +214,57 @@ function classify(abs: string, cwd: string, ex: Exemptions): FlaggedEntry | null
 // End-of-run scan: files that appeared or changed since the baseline.
 export function scanChanged(root: string, cwd: string, baseline: Baseline): FlaggedEntry[] {
 	const ex = loadExemptions(cwd);
+	const limits = loadLimits(cwd);
 	const flagged: FlaggedEntry[] = [];
 	for (const p of changedFiles(root)) {
 		const abs = path.join(root, p);
 		const before = baseline.get(p);
 		if (before !== undefined && before === statKey(abs)) continue; // dirty before the run, untouched since
 		if (!existsSync(abs)) continue; // deleted during the run
-		const entry = classify(abs, cwd, ex);
+		const entry = classify(abs, cwd, ex, limits);
 		if (entry) flagged.push(entry);
 	}
 	return flagged;
 }
 
-// One-time onboarding scan: EVERY authored file, changed or not.
-export function scanAll(root: string, cwd: string): { flagged: FlaggedEntry[]; counts: Record<Tier, number> } {
+// Full-tree scan: EVERY authored file, changed or not (onboarding + CLI).
+export function scanAll(root: string, cwd: string): { flagged: FlaggedEntry[]; counts: Record<Tier, number>; limits: Limits } {
 	const ex = loadExemptions(cwd);
+	const limits = loadLimits(cwd);
 	const flagged: FlaggedEntry[] = [];
 	const counts: Record<Tier, number> = { warn: 0, strict: 0, error: 0 };
 	for (const p of allFiles(root)) {
-		const entry = classify(path.join(root, p), cwd, ex);
+		const entry = classify(path.join(root, p), cwd, ex, limits);
 		if (!entry) continue;
 		counts[entry.tier]++;
 		flagged.push(entry);
 	}
-	return { flagged, counts };
+	return { flagged, counts, limits };
 }
 
 // Report handed to the agent when a run settles with over-limit files.
-export function reportText(flagged: FlaggedEntry[]): string {
+export function reportText(flagged: FlaggedEntry[], limits: Limits = DEFAULT_LIMITS): string {
 	return [
 		`[file-size-guard] End-of-turn git scan: ${flagged.length} file(s) changed this turn exceed the line limits. Address each one now — split it, shrink it, extract constants, or add a convincing exemption:`,
-		...flagged.map((f) => tierMessage(f.tier, f.rel, f.lines)),
+		...flagged.map((f) => tierMessage(f.tier, f.rel, f.lines, limits)),
 	].join("\n\n");
 }
 
-function limitFor(tier: Tier): number {
-	return tier === "error" ? ERROR_LINES : tier === "strict" ? STRICT_LINES : WARN_LINES;
+function limitFor(tier: Tier, limits: Limits): number {
+	return tier === "error" ? limits.error : tier === "strict" ? limits.strict : limits.warn;
 }
 
-export function formatFlagged(entry: FlaggedEntry): string {
-	return `${entry.rel} — ${entry.lines} lines (limit ${limitFor(entry.tier)})`;
+export function formatFlagged(entry: FlaggedEntry, limits: Limits = DEFAULT_LIMITS): string {
+	return `${entry.rel} — ${entry.lines} lines (limit ${limitFor(entry.tier, limits)})`;
 }
 
-export function onboardingDialog(flagged: FlaggedEntry[], counts: Record<Tier, number>): string {
-	return `${flagged.length} file(s) exceed the line limits (${counts.error} over ${ERROR_LINES}, ${counts.strict} over ${STRICT_LINES}, ${counts.warn} over ${WARN_LINES}).\n\nYes — the agent fixes each file now (split / shrink / extract constants), exempting only what genuinely must stay one piece.\nNo — every flagged file is added to .omp/file-size-exemptions.json and never flagged again.`;
+export function onboardingDialog(flagged: FlaggedEntry[], counts: Record<Tier, number>, limits: Limits = DEFAULT_LIMITS): string {
+	return `${flagged.length} file(s) exceed the line limits (${counts.error} over ${limits.error}, ${counts.strict} over ${limits.strict}, ${counts.warn} over ${limits.warn}).\n\nYes — the agent fixes each file now (split / shrink / extract constants), exempting only what genuinely must stay one piece.\nNo — every flagged file is added to .omp/file-size-exemptions.json and never flagged again.`;
 }
 
-export function onboardingPrompt(flagged: FlaggedEntry[]): string {
+export function onboardingPrompt(flagged: FlaggedEntry[], limits: Limits = DEFAULT_LIMITS): string {
 	const list = flagged.slice(0, 1000);
-	return `[file-size-guard onboarding] This project has ${flagged.length} file(s) over the line limits:\n${list.map((f) => `- ${formatFlagged(f)}`).join("\n")}${flagged.length > list.length ? `\n…and ${flagged.length - list.length} more.` : ""}\nFix every one now: split into smaller modules, shrink them, or extract repeated literals into constants. Only where a single piece is genuinely required, add a convincing per-file exemption to .omp/file-size-exemptions.json. The guard re-scans everything you change when your run ends and will send you back to any file still over the limit.`;
+	return `[file-size-guard onboarding] This project has ${flagged.length} file(s) over the line limits:\n${list.map((f) => `- ${formatFlagged(f, limits)}`).join("\n")}${flagged.length > list.length ? `\n…and ${flagged.length - list.length} more.` : ""}\nFix every one now: split into smaller modules, shrink them, or extract repeated literals into constants. Only where a single piece is genuinely required, add a convincing per-file exemption to .omp/file-size-exemptions.json. The guard re-scans everything you change when your run ends and will send you back to any file still over the limit.`;
 }
 
 export function markerExists(cwd: string): boolean {
