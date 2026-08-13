@@ -1,6 +1,9 @@
 # file-size-guard
 
-A cross-host AI-agent guard that stops the agent from creating oversized files without justification. Any file the agent makes or changes — through file tools, shell commands, or subagents — is checked against three line-count tiers, using git as the source of truth for what changed. One shared core (`core/guard.ts`) powers thin adapters for **omp**, **pi**, and **opencode**.
+A cross-host guard that stops oversized files from being created without justification — by AI agents **and** by humans. One shared core (`core/guard.ts`) powers:
+
+- **Agent extensions** for **omp**, **pi**, and **opencode** — any file the agent makes or changes (file tools, shell commands, subagents) is checked against three line-count tiers, using git as the source of truth for what changed
+- **The `file-size-guard` CLI** — the same check for pre-commit hooks and CI, so the whole team follows one policy
 
 ## Behavior
 
@@ -12,29 +15,22 @@ A cross-host AI-agent guard that stops the agent from creating oversized files w
 
 Warnings repeat on every run while a file stays over the limit.
 
-## Requirements (all hosts)
+## Requirements
 
 - The project must be a **git repository** — outside one, the guard is completely inactive by design
 - `git` on `PATH`
-
-## Repository layout
-
-- `core/guard.ts` — all host-agnostic logic: line counting, git diffing, tiering, exemptions, onboarding scans, report formatting
-- `adapters/omp/` — Oh My Pi adapter (extension events: `tool_call`, `session_stop`, `before_agent_start`, `agent_end`)
-- `adapters/pi/` — pi adapter (extension events: `tool_call`, `before_agent_start`, `agent_end`, `session_start`)
-- `adapters/opencode/` — opencode adapter (plugin hooks: `tool.execute.before`, `event`/`session.idle`)
-- `dist/` — standalone single-file bundles (`npm run build`) for manual installs that cannot resolve the shared core import
+- Node.js ≥ 18 for the CLI
 
 ## Install
 
 ### Oh My Pi (omp)
 
-Plugin package (recommended — managed by `omp plugin`, upgradeable). Requires `bun` on `PATH` (`curl -fsSL https://bun.sh/install | bash`); without it, use the single-file fallback below:
+Plugin package (recommended — managed, upgradeable). Requires `bun` on `PATH` (`curl -fsSL https://bun.sh/install | bash`); without it, use the single-file fallback below:
 
 ```bash
-omp install https://github.com/abdulrahmanch1/omp-file-size-guard
+omp plugin install https://github.com/abdulrahmanch1/omp-file-size-guard
 # or from a local clone:
-omp install ./omp-file-size-guard
+omp plugin install ./omp-file-size-guard
 ```
 
 Manage with `omp plugin list` / `omp plugin uninstall omp-file-size-guard` / `omp plugin doctor`.
@@ -73,11 +69,9 @@ curl -o ~/.config/opencode/plugin/file-size-guard.js \
   https://raw.githubusercontent.com/abdulrahmanch1/omp-file-size-guard/main/dist/opencode/file-size-guard.js
 ```
 
-Or add the repository URL to the `plugin` array in `opencode.json`.
-
 ## CLI — same policy for humans and CI
 
-The guard is not only for agents. `file-size-guard check` scans **every authored file** in the repository (tracked + untracked, `.gitignore` respected, exemptions applied) and exits non-zero when files are over the limits:
+`file-size-guard check` scans **every authored file** in the repository (tracked + untracked, `.gitignore` respected, exemptions applied) and exits non-zero when files are over the limits:
 
 ```bash
 # no install needed — npx runs it straight from npm:
@@ -111,9 +105,11 @@ GitHub Action:
    - opencode: injected as a user prompt into the session at `session.idle`, which starts the fix run on its own
 3. Files dirty *before* the run are only flagged if the agent touched them. `.gitignore`d paths (`node_modules/`, build output, …) are excluded natively by git. The exemption file is re-read on every check.
 
+The CLI runs the same full-tree scan used by agent onboarding.
+
 ## First run in a project (onboarding)
 
-The first time the guard runs in a git repository, it scans **every** authored file (tracked + untracked, `.gitignore` respected) for pre-existing violations:
+The first time an agent session runs in a git repository, the guard scans **every** authored file (tracked + untracked, `.gitignore` respected) for pre-existing violations:
 
 - **omp** — shows an interactive dialog with per-tier counts. **Yes**: the agent starts fixing each file immediately (the end-of-run scan supervises the work). **No**: every flagged file is added to the exemptions file and never flagged again. Headless sessions are skipped; a dialog that fails or times out postpones onboarding.
 - **pi** — a deferred headless-safe confirm dialog offers the same two choices, delivered via `sendUserMessage`.
@@ -123,7 +119,7 @@ Onboarding runs **exactly once per project**, recorded in `.omp/file-size-guard-
 
 ## Exemptions — per project
 
-Each project keeps its **own** exemption file at `<project>/.omp/file-size-exemptions.json`. Exempted files are never flagged again:
+Each project keeps its **own** exemption file at `<project>/.omp/file-size-exemptions.json`. Exempted files are never flagged again — by the agents, the CLI, or CI:
 
 ```json
 {
@@ -146,11 +142,20 @@ Each project keeps its **own** exemption file at `<project>/.omp/file-size-exemp
 - A run aborted by the user (Esc) skips its scan; its changes count as pre-existing for the next prompt.
 - Files outside the repository are not scanned.
 
+## Repository layout
+
+- `core/guard.ts` — all host-agnostic logic: line counting, git diffing, tiering, exemptions, onboarding scans, report formatting
+- `adapters/omp/` — Oh My Pi adapter (extension events: `tool_call`, `session_stop`, `before_agent_start`, `agent_end`)
+- `adapters/pi/` — pi adapter (extension events: `tool_call`, `before_agent_start`, `agent_end`, `session_start`)
+- `adapters/opencode/` — opencode adapter (plugin hooks: `tool.execute.before`, `event`/`session.idle`)
+- `bin/fsg.ts` — the `file-size-guard` CLI entry point
+- `build.mjs` — esbuild script producing the standalone bundles in `dist/` (`npm run build`)
+
 ## Development
 
 ```bash
 npm install
-npm run build   # esbuild -> dist/omp + dist/pi + dist/opencode
+npm run build   # esbuild -> dist/omp + dist/pi + dist/opencode + dist/bin
 ```
 
 ## License
