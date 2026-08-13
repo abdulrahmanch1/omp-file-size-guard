@@ -177,44 +177,45 @@ export default function fileSizeGuard(pi: ExtensionAPI): void {
 	// choose: the agent fixes all over-limit files now, or every flagged file is
 	// bulk-exempted. A marker file makes it run exactly once; headless sessions
 	// and non-git directories are skipped without consuming the marker.
+	// Everything past the three cheap guards runs in a managed timer: the scan
+	// can take seconds on a huge repo and the confirm can sit unanswered, both
+	// longer than the 30s handler-dispatch timeout. A failed/dismissed dialog
+	// POSTPONES onboarding (no marker, no exemptions) — never bulk-exempts.
 	pi.on("session_start", async (_event, ctx) => {
 		const root = repoRoot(ctx.cwd);
 		if (root === null) return;
 		const markerPath = path.join(ctx.cwd, ONBOARDED_REL);
 		if (existsSync(markerPath)) return;
 		if (!ctx.hasUI) return;
-		const ex = loadExemptions(ctx.cwd);
-		const flagged: string[] = [];
-		const counts = { warn: 0, strict: 0, error: 0 };
-		for (const p of allFiles(root)) {
-			const abs = path.join(root, p);
-			if (shouldSkip(abs, ctx.cwd) || isExempt(abs, ctx.cwd, ex)) continue;
-			const lines = countFileLines(abs);
-			if (lines === null) continue;
-			const tier = tierFor(lines);
-			if (!tier) continue;
-			counts[tier]++;
-			const limit = tier === "error" ? ERROR_LINES : tier === "strict" ? STRICT_LINES : WARN_LINES;
-			flagged.push(`${relKey(abs, ctx.cwd)} — ${lines} lines (limit ${limit})`);
-		}
-		const writeMarker = (decision: string): void => {
-			try {
-				mkdirSync(path.join(ctx.cwd, ".omp"), { recursive: true });
-				writeFileSync(markerPath, `${JSON.stringify({ version: 1, decision, at: new Date().toISOString() })}\n`);
-			} catch {
-				// a read-only .omp must not break the session; onboarding simply re-offers next time
-			}
-		};
-		if (flagged.length === 0) {
-			writeMarker("clean");
-			return;
-		}
-		const message = `${flagged.length} file(s) exceed the line limits (${counts.error} over ${ERROR_LINES}, ${counts.strict} over ${STRICT_LINES}, ${counts.warn} over ${WARN_LINES}).\n\nYes — the agent fixes each file now (split / shrink / extract constants), exempting only what genuinely must stay one piece.\nNo — every flagged file is added to .omp/file-size-exemptions.json and never flagged again.`;
-		// Deferred past session_start dispatch: the confirm may sit unanswered
-		// longer than the 30s handler timeout. A failed/dismissed dialog POSTPONES
-		// onboarding (no marker, no exemptions) — it never bulk-exempts by accident.
 		ctx.setTimeout(() => {
 			void (async () => {
+				const ex = loadExemptions(ctx.cwd);
+				const flagged: string[] = [];
+				const counts = { warn: 0, strict: 0, error: 0 };
+				for (const p of allFiles(root)) {
+					const abs = path.join(root, p);
+					if (shouldSkip(abs, ctx.cwd) || isExempt(abs, ctx.cwd, ex)) continue;
+					const lines = countFileLines(abs);
+					if (lines === null) continue;
+					const tier = tierFor(lines);
+					if (!tier) continue;
+					counts[tier]++;
+					const limit = tier === "error" ? ERROR_LINES : tier === "strict" ? STRICT_LINES : WARN_LINES;
+					flagged.push(`${relKey(abs, ctx.cwd)} — ${lines} lines (limit ${limit})`);
+				}
+				const writeMarker = (decision: string): void => {
+					try {
+						mkdirSync(path.join(ctx.cwd, ".omp"), { recursive: true });
+						writeFileSync(markerPath, `${JSON.stringify({ version: 1, decision, at: new Date().toISOString() })}\n`);
+					} catch {
+						// a read-only .omp must not break the session; onboarding simply re-offers next time
+					}
+				};
+				if (flagged.length === 0) {
+					writeMarker("clean");
+					return;
+				}
+				const message = `${flagged.length} file(s) exceed the line limits (${counts.error} over ${ERROR_LINES}, ${counts.strict} over ${STRICT_LINES}, ${counts.warn} over ${WARN_LINES}).\n\nYes — the agent fixes each file now (split / shrink / extract constants), exempting only what genuinely must stay one piece.\nNo — every flagged file is added to .omp/file-size-exemptions.json and never flagged again.`;
 				let fix: boolean;
 				try {
 					fix = await ctx.ui.confirm("file-size-guard: initial project scan", message);
